@@ -98,7 +98,7 @@ const KeyBinds = Object.freeze({
     PreviewImg3: new KeyPress(['e','9'], ()=> toggleImgPreview(2)),
     PreviewImg4: new KeyPress(['r','+'], ()=> toggleImgPreview(3)),
     PreviewPFP: new KeyPress(['a','*'], ()=> toggleImgPreview(-1)),
-    PreviewBanner: new KeyPress(['-'], ()=> toggleImgPreview(-2)),
+    PreviewBanner: new KeyPress(['d','-','b'], ()=> toggleImgPreview(-2)),
     Peek: new KeyPress(['y','/'], ()=> safeClick(getPeekButton())),
     AIScanPreviewImg: new KeyPress(['t','0'], ()=> aiScan(getCurrentImgPreview()))
 });
