@@ -2,14 +2,20 @@
 // @name         AIMod Helper
 // @namespace    AIMod
 // @author       reverse-norms.bsky.social
-// @version      1.22
+// @version      1.24
 // @description  Userscript to enhance aimod.social operation
-// @match        *://aimod.social/*
+// @match        https://aimod.social/*
+// @match        https://bsky.app/*
 // @connect      bsky.app
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=aimod.social
+// @updateURL    https://github.com/ai-dentify/aimod.social-helper/raw/main/aimod_helper.user.js
+// @downloadURL  https://github.com/ai-dentify/aimod.social-helper/raw/main/aimod_helper.user.js
 // @run-at       document-start
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
+// @grant        GM_setValue
+// @grant        GM.getValue
+// @grant unsafeWindow
 // ==/UserScript==
 
 // Label toggle keys: 1 = AI Imagery, 2 = Frequent, 3 = Occasional, 4 = PFP/Banner, 5 = Modified, 6 = Assisted
@@ -102,6 +108,16 @@ const KeyBinds = Object.freeze({
     Peek: new KeyPress(['y','/'], ()=> safeClick(getPeekButton())),
     AIScanPreviewImg: new KeyPress(['t','0'], ()=> aiScan(getCurrentImgPreview()))
 });
+
+
+const loadingIcon = new Image();
+loadingIcon.fetchPriority = "high";
+loadingIcon.src = "https://i.imgur.com/pZOUBtN.gif";
+loadingIcon.decoding = "sync";
+
+// *** PREFS ***//
+var showOnlyMedia = null;
+var showOnlyMediaToggleBtn = null;
 
 
 function getReportWindow() {
@@ -205,6 +221,16 @@ function getReportType()
     return ReportType.Unknown;
 }
 
+function getDIDFromURL(url)
+{
+    let didIdx = url.indexOf('did:plc:');
+    if(didIdx >= 0)
+    {
+        return url.substring(didIdx).split('/')[0];
+    }
+    return null;
+}
+
 function getReportDID()
 {
     const subjectElem = getReportWindow()?.querySelector('form#mod-action-panel input#subject');
@@ -232,28 +258,33 @@ function getNextButton(goNext = false)
 async function getProfileBanner(pfp)
 {
     if(pfp == null) { console.warn("AIMod Helper: Couldn't find Profile Pic element..."); return; }
-    if(pfp.hasAttribute('cachedbanner')) { return pfp.getAttribute('cachedbanner'); }
-    else
-    {
-        let bannerSrc = null;
-        setSubmitButtonsEnabled(false);
-        const textBox = getCommentBox();
-        let textContent = textBox.value;
 
-        textBox.value = "Querying user banner URL... Please wait.";
+    const userDID = getDIDFromURL(pfp.src);
+    if(userDID == null) { return; }
 
-        const profile = await getProfile(getReportDID());
-        if(profile && Object.hasOwn(profile, 'banner'))
-        {
-            bannerSrc = profile.banner;
-            pfp.setAttribute('cachedbanner', bannerSrc);
-        }
-        textBox.value = textContent;
-
-        setSubmitButtonsEnabled(true);
-        return bannerSrc;
+    if(pfp.hasAttribute('cachedbanner') && pfp.hasAttribute("lastDID") && pfp.getAttribute('lastDID') == userDID)
+    { //Noticed a glitch can happen where the IMG element isn't completely reconstructed and thus previous banner data can end up being re-used. Do DID sanity check
+        return pfp.getAttribute('cachedbanner');
     }
-    return null;
+
+    pfp.setAttribute('lastDID', userDID);
+    let bannerSrc = null;
+    setSubmitButtonsEnabled(false);
+    const textBox = getCommentBox();
+    let textContent = textBox.value;
+
+    textBox.value = "Querying user banner URL... Please wait.";
+
+    const profile = await getProfile(userDID);
+    if(profile && Object.hasOwn(profile, 'banner'))
+    {
+        bannerSrc = profile.banner;
+        pfp.setAttribute('cachedbanner', bannerSrc);
+    }
+    textBox.value = textContent;
+
+    setSubmitButtonsEnabled(true);
+    return bannerSrc;
 }
 
 function getCommentBox()
@@ -274,6 +305,7 @@ getHiveButton();
 
 
 /***  BEHAVIOR  ***/
+
 async function setAction(actionType)
 {
     let reportWindow = getReportWindow();
@@ -316,6 +348,7 @@ async function setAction(actionType)
     return false;
 }
 
+
 async function toggleLabel(label)
 {
     const reportWindow = getReportWindow();
@@ -335,12 +368,31 @@ async function toggleLabel(label)
         const labelWasActive = activeLabels.includes(label);
         const disableLabels = [];
 
+        const appliedLabelSpans = reportWindow.querySelectorAll('div[data-cy="label-list"] button > span');
+        const appliedLabels = [];
+
+        if(appliedLabelSpans != null && appliedLabelSpans.length > 0)
+        {
+            for(let i = 0; i < appliedLabelSpans.length; i++)
+            {
+                appliedLabels.push(appliedLabelSpans[i].innerText);
+            }
+        }
+
         Array.from(labelsContainer.childNodes).forEach(button =>
         {
             const otherLabel = button.innerText;
-            if(!AILabel.isAIModLabel(otherLabel)) { return; }
+            if(AILabel.isAIModLabel(otherLabel) == false)
+            {
+                // Existing other labeler labels not always active when setting labels again
+                if(appliedLabels.includes(otherLabel) && !activeLabels.includes(otherLabel))
+                {
+                    safeClick(button);
+                }
+                return;
+            }
             //Don't try to activate label if it's not for this post type
-            if(otherLabel == label && labelReportType == reportType) { safeClick(button); return; }
+            if(otherLabel == label && labelReportType === reportType) { sleep(0.05).then(()=>{ safeClick(button);}); return; }
         ///Rest to check if we should disable other labels
             if(!activeLabels.includes(otherLabel)) { return; }
             //Special case to not disable secondary Profile
@@ -351,21 +403,24 @@ async function toggleLabel(label)
                    || labelReportType == ReportType.Post) { return; } //Don't try to clear Profile labels if Post label key was hit
 
             } else if(labelReportType == ReportType.Profile) { return; }
-
+            console.log("disable other 2: " + otherLabel);
             disableLabels.push(button);
         });
         disableLabels.forEach(labelBtn => {
+            console.log("disabling " + labelBtn.innerText);
             sleep(Math.random() * 0.06).then(() => safeClick(labelBtn)); //Hack by delaying to avoid multiple click events at once being rejected
         });
         await sleep(Math.random() * 0.13);
-        setSubmitButtonsEnabled(true);
+
         if(label == AILabel.UserAvatarOrBanner)
         {
             activeLabels = labelsValue.value.split(',');
             const pfpLabelActive = activeLabels.includes(AILabel.UserAvatarOrBanner);
             await setPFPLinkInText(pfpLabelActive);
         }
+        setSubmitButtonsEnabled(true);
     }
+    else { setSubmitButtonsEnabled(true); }
 }
 
 async function setPFPLinkInText(add)
@@ -421,7 +476,7 @@ async function clickSubmit(goNext = true, reportWindow = null)
         console.warn("AIMod Helper: Submit button not found. Script probably needs updating.");
         return;
     }
-    if(submitNextButton.disabled) { return; }
+    if(submitNextButton.disabled || getImgPreviewWindow() != null) { return; }
 
     safeClick(getHiveWindow()?.querySelector('#hvaid-close-icon'));
 
@@ -447,6 +502,15 @@ async function clickSubmit(goNext = true, reportWindow = null)
 
 async function toggleImgPreview(index)
 {
+    let imgPreview = getCurrentImgPreview();
+    let imgPreviewSrc = null;
+
+    if(imgPreview) {
+        imgPreviewSrc = imgPreview.src;
+        imgPreview.src = loadingIcon.src;
+    }
+
+
     const targetImage = await getReportImgElem(index);
 
     if(targetImage.elem == null || targetImage.elem.nodeName != 'IMG') { return; }
@@ -454,11 +518,12 @@ async function toggleImgPreview(index)
     let clickElem = targetImage.elem;
     let targSrc = targetImage.src;
     let replacePreviewSrc = targetImage.replaceSrc;
-    let imgPreview = getCurrentImgPreview();
+
 
     if(imgPreview)
     {
-        if(imgPreview.src.split('/did:plc:').at(-1) == targSrc.split('/did:plc:').at(-1))
+        if(imgPreviewSrc == loadingIcon.src) { return; }
+        if(imgPreviewSrc != loadingIcon.src && imgPreviewSrc.split('/did:plc:').at(-1) == targSrc.split('/did:plc:').at(-1))
         {
             //Close the preview window if the same image preview button is pressed when it's already being viewed
             safeClick(getImgPreviewWindow().querySelector('div.yarl__toolbar > button'));
@@ -466,13 +531,13 @@ async function toggleImgPreview(index)
         }
 
         let targIsAccountMedia = targSrc.includes('/img/avatar/') || targSrc.includes('/img/banner/') || replacePreviewSrc;
-        let prevIsAccountMedia = imgPreview.src.includes('/img/avatar/') || imgPreview.src.includes('/img/banner/') || imgPreview.hasAttribute('replaced');
+        let prevIsAccountMedia = imgPreviewSrc.includes('/img/avatar/') || imgPreviewSrc.includes('/img/banner/') || imgPreview.hasAttribute('replaced');
 
         if(targIsAccountMedia != prevIsAccountMedia)
         { //If switching from previewing an Avatar and an Image, close the current preview, otherwise they get doubled up and interaction breaks
             safeClick(getImgPreviewWindow().querySelector('div.yarl__toolbar > button'));
         }
-
+        await sleep(0.1);
         safeClick(clickElem);
         await sleep(0.1);
 
@@ -493,6 +558,7 @@ async function toggleImgPreview(index)
         if(replacePreviewSrc)
         {
             imgPreview = await getCurrentImgPreviewAsync();
+            imgPreview.src = loadingIcon.src;
             imgPreview.setAttribute('replaced', true);
             imgPreview.style = "";
             imgPreview.src = targSrc;
@@ -562,7 +628,7 @@ function aiScan(imgElem)
         imageType = imgElem.src.includes('/img/banner/') ? "Banner" : imageType;
 
         const scanResultBox = setupScanResultsElement(imgElem.parentElement, `(take with grain of salt, many false positives)\n\nWasItAI.com ${imageType} Scan Results:`, srcImg);
-        if(scanResultBox.scanning != true && scanResultBox.success != true)
+        if(scanResultBox && scanResultBox.scanning != true && scanResultBox.success != true)
         {
             scanResultBox.scanning = true;
 
@@ -745,6 +811,84 @@ async function awaitElem(root, query, timeout = 2.0, obsArguments = {childList: 
     });
 }
 
+// *** FEED RESULT FILTERING ***//
+
+//Intercept fetch() responses on bsky.app if they are for a Profile "Posts" feed, adding Replies and removing non-media posts.
+
+unsafeWindow.origFetch = exportFunction(unsafeWindow.fetch, unsafeWindow);
+
+unsafeWindow.fetch = exportFunction(async (...args) => {
+    let [resource, config] = args;
+    if(!window.location.href.includes('bsky.app/'))
+    {
+        return config != null ? await unsafeWindow.origFetch(resource,config) : await unsafeWindow.origFetch(resource);
+    }
+
+    let isURL = resource?.constructor === URL;
+    let isRequest = resource?.constructor === Request;
+    if(!isRequest)
+    {
+        resource = new Request(resource);
+    }
+    else { resource = new Request(resource.url, resource); }
+
+    if(isRequest && resource.url.includes('posts_and_author_threads'))
+    {
+        if(showOnlyMedia == null) { await sleep(0.2); }
+
+        if(showOnlyMedia === true)
+        {
+            resource = new Request(resource.url.replace('posts_and_author_threads', 'posts_with_replies').replace('limit=30','limit=100'), resource);
+            let posts = config != null ? await unsafeWindow.origFetch(resource,config) : await unsafeWindow.origFetch(resource);
+
+            if(!posts.ok) { return posts; }
+
+            let feed = await posts.json();
+            if(feed == null || !Object.hasOwn(feed, 'feed')) { return posts; }
+
+            let feedItems = feed.feed;
+            const itemCnt = feedItems.length;
+            let keptItems = [];
+            let keptItemCnt = 0;
+
+            for(let i = 0; i < itemCnt; i++)
+            {
+                let post = feedItems[i];
+                if(Object.hasOwn(post.post, 'embed'))
+                {
+                    const embed = post.post.embed;
+                    const embedType = embed.$type;
+                    if(Object.hasOwn(post, 'reason') && post.reason.$type.includes('Repost')) { continue; }
+
+                    const isExternal = Object.hasOwn(embed, 'external');
+
+                    if(embedType.includes('embed.images#') || embedType.includes('embed.video#') || isExternal === true)
+                    {
+                        if(isExternal === true && (!Object.hasOwn(embed.external, 'thumb') && !Object.hasOwn(post.post.record.embed.external, 'thumb')))
+                        {
+                            continue;
+                        }
+                        if(Object.hasOwn(post, 'reply'))
+                        {
+                            delete post.reply;
+                            delete post.post.record.reply;
+                        }
+
+                        keptItems.push(post);
+                        keptItemCnt += 1;
+                    }
+                }
+            }
+
+            feed.feed = keptItems;
+
+            return new Response(JSON.stringify(feed), { status: posts.status, statusText: posts.statusText, headers: posts.headers });
+        }
+    }
+    return config != null ? await unsafeWindow.origFetch(resource,config) : await unsafeWindow.origFetch(resource);
+}, unsafeWindow);
+
+
 // *** STYLING ***//
 
 GM_addStyle(`#mod-action-panel > .flex:has(input#subject[value^="did:plc"]):not(:has(input#subject[value*="feed.post/"])) div.max-w-xl p.mb-3 { color: hsl(0 65% 50% / 1) !important; }
@@ -776,4 +920,96 @@ GM_addStyle(`#mod-action-panel > .flex:has(input#subject[value^="did:plc"]):not(
 }
 form#mod-action-panel div:has(> button[type="submit"]) > button[disabled] {
  opacity: 20%;
+}
+
+/* The switch - the box around the slider */
+.aimodswitch {
+ font-size: 11px;
+ position: relative;
+ display: inline-block;
+ width: 38px;
+ height: 16px;
+ padding-top: 6px;
+}
+
+/* Hide default HTML checkbox */
+.aimodswitch input {
+ opacity: 1;
+ width: 0;
+ height: 0;
+}
+
+/* Prefs Slider */
+.aimodslider {
+ position: absolute;
+ cursor: pointer;
+ top: 0;
+ left: 0;
+ right: 0;
+ bottom: 0px;
+ background: rgba(0, 0, 0, 0.10);
+ transition: .4s;
+ border-radius: 30px;
+ border: 1px solid #323e4b;
+}
+
+.aimodslider:before {
+ position: absolute;
+ content: "";
+ height: 90%;
+ width: auto;
+ aspect-ratio: 1.0;
+ border-radius: 16px;
+ left: 0;
+ top: 1px;
+ bottom: 0;
+ background-color: white;
+ transition: .4s;
+}
+
+input:checked + .aimodslider {
+ background-color: rgb(38 125 217);
+ border: 1px solid transparent;
+}
+
+input:checked + .aimodslider:before {
+ transform: translateX(1.5em);
+}
+.bskyfeedpref_container {
+ display: none;
+}
+div:has(main div[style*="display: flex"] div[data-testid="profileScreen"] [data-testid="profilePager"] [data-testid$="-Posts"] > div[style*="background-color"]) .bskyfeedpref_container {
+ display: block !important;
+}
+.bskyfeedpref_container > p {
+ color: rgb(147, 165, 183);
 }`);
+
+function setupPrefs()
+{
+    if(window.location.href.includes('aimod.social')){ return; }
+
+    let showOnlyMediaToggleContainer = document.createElement('div');
+    showOnlyMediaToggleContainer.className = "bskyfeedpref_container";
+    showOnlyMediaToggleContainer.display = "none";
+    showOnlyMediaToggleContainer.innerHTML = `<p>Only Show Media Posts: <label class="aimodswitch">
+  <input type="checkbox" id="bskyfeedpref_input">
+  <span class="aimodslider"></span>
+</label></p>`;
+    showOnlyMediaToggleBtn = showOnlyMediaToggleContainer.querySelector('input');
+showOnlyMediaToggleBtn.addEventListener('change', (onChange) => {
+    GM_setValue('aimodhelper_showOnlyMedia', onChange.target.checked);
+    showOnlyMedia = onChange.target.checked;
+});
+    GM.getValue('aimodhelper_showOnlyMedia', false).then(result => {
+        console.log("got pref: " + result);
+        showOnlyMedia = result;
+        showOnlyMediaToggleBtn.checked = result;
+    });
+
+    awaitElem(document.body, '#root div:has(> main) > div:has(a[href*="/about/support/"]) ').then(container => {
+        container.appendChild(showOnlyMediaToggleContainer);
+    });
+}
+
+setupPrefs();
